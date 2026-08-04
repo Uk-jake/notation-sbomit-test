@@ -1,26 +1,36 @@
 name: build-sbom
 
 # Generates an SBOMit SBOM by observing the project's own build command.
+#
 # The tools are built by the install-tools reusable workflow in the same run.
 
 on:
   workflow_dispatch:
+    inputs:
+      tools_run_id:
+        description: "Run ID to reuse sbomit-tools from. Leave empty to build tools fresh."
+        required: false
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   tools:
+    if: inputs.tools_run_id == ''
     uses: ./.github/workflows/install-tools.yml
 
   sbom:
     needs: tools
+    if: always() && (needs.tools.result == 'success' || needs.tools.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
         with:
+          # Full history so the Makefile can resolve GIT_COMMIT and GIT_TAG.
           fetch-depth: 0
 
       - uses: actions/setup-go@v5
@@ -28,10 +38,21 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - uses: actions/download-artifact@v4
+      - name: Download tools (fresh build)
+        if: inputs.tools_run_id == ''
+        uses: actions/download-artifact@v4
         with:
           name: sbomit-tools
           path: tools
+
+      - name: Download tools (reused from run ${{ inputs.tools_run_id }})
+        if: inputs.tools_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: sbomit-tools
+          path: tools
+          run-id: ${{ inputs.tools_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install tools
         run: |
@@ -40,8 +61,6 @@ jobs:
           chmod +x tools/witness tools/sbomit tools/syft
           sudo install -m 0755 tools/witness tools/sbomit tools/syft /usr/local/bin/
           witness version
-          sbomit --help
-          syft version
 
       - name: Prepare signing key
         run: |
@@ -67,8 +86,7 @@ jobs:
       - name: Record the build attestation
         run: |
           set -euo pipefail
-          
-          # Wraps the project's own build command.
+          # Wraps the project's own build command unchanged.
           sudo -E HOME=$HOME PATH=$PATH GOTOOLCHAIN=local witness run \
             --experimental \
             --step build \
