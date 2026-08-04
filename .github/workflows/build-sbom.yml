@@ -61,6 +61,8 @@ jobs:
           chmod +x tools/witness tools/sbomit tools/syft
           sudo install -m 0755 tools/witness tools/sbomit tools/syft /usr/local/bin/
           witness version
+          sbomit --help
+          syft version
 
       - name: Prepare signing key
         run: |
