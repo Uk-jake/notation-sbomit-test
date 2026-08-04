@@ -1,0 +1,107 @@
+name: install-tools
+
+# Installs the three tools required by SBOMit
+#   witness  - records the attestation during the build
+#   sbomit   - generates the SBOM from the attestation
+#   syft     - invoked by sbomit when --catalog syft is used
+#
+# The binaries are uploaded as the "sbomit-tools" artifact.
+
+# This workflow can be used in two ways:
+#
+#   1. Standalone (workflow_dispatch) - to verify the tools build correctly.
+#
+#   2. Called from another workflow (workflow_call) - the artifact is then
+#      available to any job in the SAME run, downloadable by name alone:
+#
+#        jobs:
+#          tools:
+#            uses: ./.github/workflows/install-tools.yml
+#          build:
+#            needs: tools
+#            steps:
+#              - uses: actions/download-artifact@v4
+#                with: { name: sbomit-tools, path: tools }
+
+on:
+  workflow_dispatch:
+    inputs:
+      go_version:
+        description: "Go version used to build witness and sbomit"
+        required: false
+        default: "1.26.5"
+      syft_version:
+        description: "syft version to install (leave empty for latest)"
+        required: false
+        default: "v1.49.0"
+  workflow_call:
+    inputs:
+      go_version:
+        type: string
+        required: false
+        default: "1.26.5"
+      syft_version:
+        type: string
+        required: false
+        default: "v1.49.0"
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache: false
+
+      - name: Install witness
+        run: |
+          set -euo pipefail
+          git clone https://github.com/in-toto/witness.git
+          git clone https://github.com/in-toto/go-witness.git
+
+          cd witness
+          go work init .
+          go work use ../go-witness
+
+          make build
+          sudo install -m 0755 ./bin/witness /usr/local/bin/witness
+
+          witness version
+
+      - name: Install sbomit
+        run: |
+          set -euo pipefail
+          git clone https://github.com/SBOMit/sbomit.git
+          cd sbomit
+
+          make build
+          sudo install -m 0755 ./bin/sbomit /usr/local/bin/sbomit
+
+          sbomit --help
+
+      - name: Install syft
+        run: |
+          set -euo pipefail
+          curl -sSfL https://get.anchore.io/syft \
+            | sudo sh -s -- -b /usr/local/bin ${{ inputs.syft_version }}
+
+          syft version
+
+      - name: Collect binaries
+        run: |
+          set -euo pipefail
+          mkdir -p tools
+          cp "$(command -v witness)" "$(command -v sbomit)" "$(command -v syft)" tools/
+          ls -lh tools/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbomit-tools
+          path: tools
+          retention-days: 30

@@ -1,0 +1,105 @@
+name: build-sbom
+
+# Generates an SBOMit SBOM by observing the project's own build command.
+# The tools are built by the install-tools reusable workflow in the same run.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tools:
+    uses: ./.github/workflows/install-tools.yml
+
+  sbom:
+    needs: tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbomit-tools
+          path: tools
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          # upload-artifact does not preserve the executable bit.
+          chmod +x tools/witness tools/sbomit tools/syft
+          sudo install -m 0755 tools/witness tools/sbomit tools/syft /usr/local/bin/
+          witness version
+          sbomit --help
+          syft version
+
+      - name: Prepare signing key
+        run: |
+          set -euo pipefail
+          openssl genpkey -algorithm ed25519 -out signing-key.pem
+          chmod 600 signing-key.pem
+
+      - name: Generate and trust the interception CA
+        run: |
+          set -euo pipefail
+          sudo -E HOME=$HOME PATH=$PATH witness run \
+            --experimental \
+            --step ca-bootstrap \
+            -a network-trace \
+            --signer-file-key-path ./signing-key.pem \
+            -o /dev/null \
+            -- /bin/true
+
+          sudo cp ./witness_nettrace_proxy/ca_cert.pem \
+            /usr/local/share/ca-certificates/witness-nettrace.crt
+          sudo update-ca-certificates
+
+      - name: Record the build attestation
+        run: |
+          set -euo pipefail
+          
+          # Wraps the project's own build command.
+          sudo -E HOME=$HOME PATH=$PATH GOTOOLCHAIN=local witness run \
+            --experimental \
+            --step build \
+            -a network-trace \
+            --trace --attestor-command-run-trace-backend ebpf \
+            --signer-file-key-path ./signing-key.pem \
+            -o attestation.json \
+            -- make build
+
+      - name: Restore ownership
+        run: |
+          # The build ran as root; reclaim the workspace for the next steps.
+          sudo chown -R "$USER:$USER" . "$HOME/.cache" 2>/dev/null || true
+          ls -lh bin/
+
+      - name: Generate the SBOM
+        run: |
+          set -euo pipefail
+          sbomit generate attestation.json \
+            --catalog syft \
+            --project-dir . \
+            --format spdx23 \
+            --name "${{ github.repository }}@${{ github.sha }}" \
+            --output sbom.spdx.json
+
+          echo "packages: $(jq '.packages | length' sbom.spdx.json)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            sbom.spdx.json
+            attestation.json
+          retention-days: 30
